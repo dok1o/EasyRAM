@@ -25,12 +25,7 @@ jobs:
 
       - name: Compile EasyRam GUI
         run: |
-          cl.exe /EHsc /W3 /O2 /DUNICODE /D_UNICODE ^
-            /Fe:EasyRam.exe ^
-            EasyRam.cpp ^
-            /link psapi.lib comctl32.lib user32.lib gdi32.lib advapi32.lib ^
-            /SUBSYSTEM:WINDOWS
-
+          cl.exe /EHsc /W3 /O2 /DUNICODE /D_UNICODE /Fe:EasyRam.exe EasyRam.cpp /link psapi.lib comctl32.lib user32.lib gdi32.lib advapi32.lib /SUBSYSTEM:WINDOWS
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
