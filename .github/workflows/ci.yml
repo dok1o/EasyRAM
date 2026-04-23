@@ -1,0 +1,61 @@
+name: EasyRam CI/CD
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # ─────────────────────────────────────────
+  # JOB 1 — BUILD
+  # ─────────────────────────────────────────
+  build:
+    name: Build on Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Compile EasyRam GUI
+        run: |
+          cl.exe /EHsc /W3 /O2 /DUNICODE /D_UNICODE ^
+            /Fe:EasyRam.exe ^
+            EasyRam.cpp ^
+            /link psapi.lib comctl32.lib user32.lib gdi32.lib advapi32.lib ^
+            /SUBSYSTEM:WINDOWS
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EasyRam
+          path: EasyRam.exe
+
+  # ─────────────────────────────────────────
+  # JOB 2 — RELEASE (version tags only)
+  # ─────────────────────────────────────────
+  release:
+    name: Publish GitHub Release
+    runs-on: windows-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: EasyRam
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: EasyRam.exe
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
