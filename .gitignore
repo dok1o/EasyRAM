@@ -1,0 +1,14 @@
+*.exe
+*.obj
+*.ilk
+*.pdb
+*.idb
+*.lib
+*.exp
+*.log
+
+.vs/
+x64/
+x86/
+Debug/
+Release/

@@ -12,8 +12,8 @@
 
 // ── ImGui (single-header amalgamation assumed in /imgui/) ──
 #include "imgui/imgui.h"
-#include "imgui/imgui_impl_win32.h"
-#include "imgui/imgui_impl_dx11.h"
+#include "imgui/backends/imgui_impl_win32.h"
+#include "imgui/backends/imgui_impl_dx11.h"
 
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -177,7 +177,12 @@ std::vector<ProcessEntry> GetProcesses(int limitMB) {
                 PROCESS_MEMORY_COUNTERS pmc;
                 if (GetProcessMemoryInfo(hp, &pmc, sizeof(pmc))) {
                     double mb   = pmc.WorkingSetSize / (1024.0 * 1024.0);
-                    std::string nm(pe.szExeFile, pe.szExeFile + strlen(pe.szExeFile));
+                    int nmLen = WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, nullptr, 0, nullptr, nullptr);
+                    std::string nm;
+                    if (nmLen > 1) {
+                        nm.resize(nmLen - 1);
+                        WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, &nm[0], nmLen - 1, nullptr, nullptr);
+                    }
                     bool highRam = (nm != "dota2.exe" && nm != "cs2.exe" && mb > limitMB);
                     list.push_back({nm, pe.th32ProcessID, mb, highRam});
                 }
