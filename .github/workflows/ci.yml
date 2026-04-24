@@ -45,7 +45,7 @@ jobs:
 
       - name: Compile EasyRam
         shell: cmd
-        run: cl.exe /EHsc /W3 /O2 /DUNICODE /D_UNICODE /I. /Iimgui /Iimgui\backends EasyRam.cpp imgui\imgui.cpp imgui\imgui_draw.cpp imgui\imgui_tables.cpp imgui\imgui_widgets.cpp imgui\backends\imgui_impl_win32.cpp imgui\backends\imgui_impl_dx11.cpp /Fe:EasyRam.exe /link psapi.lib d3d11.lib dxgi.lib user32.lib gdi32.lib advapi32.lib /SUBSYSTEM:WINDOWS
+        run: rc /r EasyRam.rc && cl.exe /EHsc /W3 /O2 /DUNICODE /D_UNICODE /I. /Iimgui /Iimgui\backends EasyRam.cpp imgui\imgui.cpp imgui\imgui_draw.cpp imgui\imgui_tables.cpp imgui\imgui_widgets.cpp imgui\backends\imgui_impl_win32.cpp imgui\backends\imgui_impl_dx11.cpp EasyRam.res /Fe:EasyRam.exe /link psapi.lib d3d11.lib dxgi.lib user32.lib gdi32.lib advapi32.lib /SUBSYSTEM:WINDOWS
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

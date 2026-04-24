@@ -9,6 +9,7 @@
 #include <sstream>
 #include <fstream>
 #include <iomanip>
+#include "resource.h"
 
 // ── ImGui (single-header amalgamation assumed in /imgui/) ──
 #include "imgui/imgui.h"
@@ -335,7 +336,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     wc.style        = CS_CLASSDC;
     wc.lpfnWndProc  = WndProc;
     wc.hInstance    = hInst;
+    wc.hIcon        = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_EASYRAM));
     wc.hCursor      = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hIconSm      = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_EASYRAM));
     wc.lpszClassName= L"EasyRamImGui";
     RegisterClassExW(&wc);
 
