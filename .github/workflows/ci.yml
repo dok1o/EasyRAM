@@ -23,10 +23,29 @@ jobs:
       - name: Set up MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Compile EasyRam GUI
+      - name: Download Dear ImGui
+        shell: cmd
         run: |
-          cl.exe /EHsc /W3 /O2 /DUNICODE /D_UNICODE /Fe:EasyRam.exe EasyRam.cpp /link psapi.lib comctl32.lib user32.lib gdi32.lib advapi32.lib /SUBSYSTEM:WINDOWS
-          
+          mkdir imgui
+          curl -L -o imgui\imgui.h          https://raw.githubusercontent.com/ocornut/imgui/v1.90.4/imgui.h
+          curl -L -o imgui\imgui.cpp        https://raw.githubusercontent.com/ocornut/imgui/v1.90.4/imgui.cpp
+          curl -L -o imgui\imgui_draw.cpp   https://raw.githubusercontent.com/ocornut/imgui/v1.90.4/imgui_draw.cpp
+          curl -L -o imgui\imgui_tables.cpp https://raw.githubusercontent.com/ocornut/imgui/v1.90.4/imgui_tables.cpp
+          curl -L -o imgui\imgui_widgets.cpp https://raw.githubusercontent.com/ocornut/imgui/v1.90.4/imgui_widgets.cpp
+          curl -L -o imgui\imgui_internal.h https://raw.githubusercontent.com/ocornut/imgui/v1.90.4/imgui_internal.h
+          curl -L -o imgui\imconfig.h       https://raw.githubusercontent.com/ocornut/imgui/v1.90.4/imconfig.h
+          curl -L -o imgui\imstb_rectpack.h https://raw.githubusercontent.com/ocornut/imgui/v1.90.4/imstb_rectpack.h
+          curl -L -o imgui\imstb_textedit.h https://raw.githubusercontent.com/ocornut/imgui/v1.90.4/imstb_textedit.h
+          curl -L -o imgui\imstb_truetype.h https://raw.githubusercontent.com/ocornut/imgui/v1.90.4/imstb_truetype.h
+          curl -L -o imgui\imgui_impl_win32.h   https://raw.githubusercontent.com/ocornut/imgui/v1.90.4/backends/imgui_impl_win32.h
+          curl -L -o imgui\imgui_impl_win32.cpp https://raw.githubusercontent.com/ocornut/imgui/v1.90.4/backends/imgui_impl_win32.cpp
+          curl -L -o imgui\imgui_impl_dx11.h    https://raw.githubusercontent.com/ocornut/imgui/v1.90.4/backends/imgui_impl_dx11.h
+          curl -L -o imgui\imgui_impl_dx11.cpp  https://raw.githubusercontent.com/ocornut/imgui/v1.90.4/backends/imgui_impl_dx11.cpp
+
+      - name: Compile EasyRam
+        shell: cmd
+        run: cl.exe /EHsc /W3 /O2 /DUNICODE /D_UNICODE /I. EasyRam.cpp imgui\imgui.cpp imgui\imgui_draw.cpp imgui\imgui_tables.cpp imgui\imgui_widgets.cpp imgui\imgui_impl_win32.cpp imgui\imgui_impl_dx11.cpp /Fe:EasyRam.exe /link psapi.lib d3d11.lib dxgi.lib user32.lib gdi32.lib advapi32.lib /SUBSYSTEM:WINDOWS
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

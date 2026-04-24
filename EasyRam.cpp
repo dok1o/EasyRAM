@@ -1,7 +1,8 @@
+#define NOMINMAX
 #include <windows.h>
 #include <psapi.h>
 #include <tlhelp32.h>
-#include <commctrl.h>
+#include <d3d11.h>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -9,54 +10,123 @@
 #include <fstream>
 #include <iomanip>
 
+// ── ImGui (single-header amalgamation assumed in /imgui/) ──
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_win32.h"
+#include "imgui/imgui_impl_dx11.h"
+
 #pragma comment(lib, "psapi.lib")
-#pragma comment(lib, "comctl32.lib")
-#pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
 
-// ─── IDs ───────────────────────────────────────────────
-#define ID_TAB          100
-#define ID_LISTVIEW     101
-#define ID_TIMER        102
-#define ID_BTN_APPLY    110
-#define ID_BTN_RESET    111
-#define ID_EDIT_LIMIT   120
-#define ID_EDIT_DOTA    121
-#define ID_EDIT_CS      122
-#define ID_EDIT_STEAM   123
-#define ID_STATIC_STEAM 130
-#define ID_STATUSBAR    140
-
-// ─── Globals ───────────────────────────────────────────
-HWND hMain, hTab, hListView, hStatusBar;
-HWND hEditLimit, hEditDota, hEditCS, hEditSteam;
-HWND hBtnApply, hBtnReset;
-
-// panels (one per tab)
-HWND hPanelDota, hPanelCS, hPanelMonitor, hPanelSettings;
-
-int  gLimitMB  = 512;
-int  gDotaMB   = 4096;
-int  gCSMB     = 4096;
-std::string gSteamPath;
-
-// ─── Structs ───────────────────────────────────────────
-struct ProcessInfo {
-    std::wstring name;
-    DWORD        pid;
-    SIZE_T       memory;
+// ─────────────────────────────────────────────────────────
+// Data
+// ─────────────────────────────────────────────────────────
+struct ProcessEntry {
+    std::string name;
+    DWORD       pid;
+    double      ramMB;
+    bool        highRam;
 };
 
-// ═══════════════════════════════════════════════════════
-// UTILITIES
-// ═══════════════════════════════════════════════════════
+static ID3D11Device*           g_pd3dDevice           = nullptr;
+static ID3D11DeviceContext*    g_pd3dDeviceContext     = nullptr;
+static IDXGISwapChain*         g_pSwapChain            = nullptr;
+static ID3D11RenderTargetView* g_mainRenderTargetView  = nullptr;
+static HWND                    g_hwnd                  = nullptr;
 
+// ─────────────────────────────────────────────────────────
+// D3D helpers
+// ─────────────────────────────────────────────────────────
+void CreateRenderTarget() {
+    ID3D11Texture2D* pBackBuffer = nullptr;
+    g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
+    if (pBackBuffer) {
+        g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_mainRenderTargetView);
+        pBackBuffer->Release();
+    }
+}
+
+void CleanupRenderTarget() {
+    if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
+}
+
+bool CreateDeviceD3D(HWND hWnd) {
+    DXGI_SWAP_CHAIN_DESC sd = {};
+    sd.BufferCount                        = 2;
+    sd.BufferDesc.Width                   = 0;
+    sd.BufferDesc.Height                  = 0;
+    sd.BufferDesc.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.BufferDesc.RefreshRate.Numerator   = 60;
+    sd.BufferDesc.RefreshRate.Denominator = 1;
+    sd.Flags                              = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    sd.BufferUsage                        = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow                       = hWnd;
+    sd.SampleDesc.Count                   = 1;
+    sd.SampleDesc.Quality                 = 0;
+    sd.Windowed                           = TRUE;
+    sd.SwapEffect                         = DXGI_SWAP_EFFECT_DISCARD;
+
+    D3D_FEATURE_LEVEL featureLevel;
+    const D3D_FEATURE_LEVEL featureLevelArray[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
+
+    HRESULT res = D3D11CreateDeviceAndSwapChain(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+        featureLevelArray, 2, D3D11_SDK_VERSION,
+        &sd, &g_pSwapChain, &g_pd3dDevice,
+        &featureLevel, &g_pd3dDeviceContext);
+
+    if (res == DXGI_ERROR_UNSUPPORTED)
+        res = D3D11CreateDeviceAndSwapChain(
+            nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
+            featureLevelArray, 2, D3D11_SDK_VERSION,
+            &sd, &g_pSwapChain, &g_pd3dDevice,
+            &featureLevel, &g_pd3dDeviceContext);
+
+    if (res != S_OK) return false;
+    CreateRenderTarget();
+    return true;
+}
+
+void CleanupDeviceD3D() {
+    CleanupRenderTarget();
+    if (g_pSwapChain)        { g_pSwapChain->Release();        g_pSwapChain = nullptr; }
+    if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
+    if (g_pd3dDevice)        { g_pd3dDevice->Release();        g_pd3dDevice = nullptr; }
+}
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+
+LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam)) return true;
+    switch (msg) {
+    case WM_SIZE:
+        if (g_pd3dDevice && wParam != SIZE_MINIMIZED) {
+            CleanupRenderTarget();
+            g_pSwapChain->ResizeBuffers(0, LOWORD(lParam), HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0);
+            CreateRenderTarget();
+        }
+        return 0;
+    case WM_SYSCOMMAND:
+        if ((wParam & 0xfff0) == SC_KEYMENU) return 0;
+        break;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+// ─────────────────────────────────────────────────────────
+// App logic
+// ─────────────────────────────────────────────────────────
 std::string GetSteamPath() {
     HKEY hKey;
     char value[512];
     DWORD size = sizeof(value);
     if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Valve\\Steam",
                       0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        if (RegQueryValueExA(hKey, "SteamPath", NULL, NULL,
+        if (RegQueryValueExA(hKey, "SteamPath", nullptr, nullptr,
                              (LPBYTE)value, &size) == ERROR_SUCCESS) {
             RegCloseKey(hKey);
             return std::string(value);
@@ -66,8 +136,36 @@ std::string GetSteamPath() {
     return "";
 }
 
-std::vector<ProcessInfo> GetProcesses() {
-    std::vector<ProcessInfo> list;
+bool PatchLaunchOptions(const std::string& steamPath,
+                        const std::string& appId, int memMB) {
+    std::string path = steamPath + "\\userdata\\config\\localconfig.vdf";
+    std::ifstream in(path);
+    if (!in.is_open()) return false;
+
+    std::string content((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+    in.close();
+
+    size_t pos = content.find(appId);
+    if (pos == std::string::npos) return false;
+
+    std::string newOpt = "\"LaunchOptions\" \"-mem " + std::to_string(memMB) + "\"";
+    size_t launchPos   = content.find("LaunchOptions", pos);
+    if (launchPos != std::string::npos) {
+        size_t end = content.find("\n", launchPos);
+        content.replace(launchPos, end - launchPos, newOpt);
+    } else {
+        content.insert(pos + appId.size(), "\n\t\t\t\t" + newOpt);
+    }
+
+    std::ofstream out(path);
+    if (!out.is_open()) return false;
+    out << content;
+    return true;
+}
+
+std::vector<ProcessEntry> GetProcesses(int limitMB) {
+    std::vector<ProcessEntry> list;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     PROCESSENTRY32 pe;
     pe.dwSize = sizeof(PROCESSENTRY32);
@@ -77,450 +175,368 @@ std::vector<ProcessInfo> GetProcesses() {
                                     FALSE, pe.th32ProcessID);
             if (hp) {
                 PROCESS_MEMORY_COUNTERS pmc;
-                if (GetProcessMemoryInfo(hp, &pmc, sizeof(pmc)))
-                    list.push_back({pe.szExeFile, pe.th32ProcessID, pmc.WorkingSetSize});
+                if (GetProcessMemoryInfo(hp, &pmc, sizeof(pmc))) {
+                    double mb   = pmc.WorkingSetSize / (1024.0 * 1024.0);
+                    std::string nm(pe.szExeFile, pe.szExeFile + strlen(pe.szExeFile));
+                    bool highRam = (nm != "dota2.exe" && nm != "cs2.exe" && mb > limitMB);
+                    list.push_back({nm, pe.th32ProcessID, mb, highRam});
+                }
                 CloseHandle(hp);
             }
         } while (Process32Next(snap, &pe));
     }
     CloseHandle(snap);
     std::sort(list.begin(), list.end(),
-              [](const ProcessInfo& a, const ProcessInfo& b){ return a.memory > b.memory; });
+              [](const ProcessEntry& a, const ProcessEntry& b){ return a.ramMB > b.ramMB; });
     return list;
 }
 
-bool PatchLaunchOptions(const std::string& steamPath, const std::string& appID, int memMB) {
-    std::string path = steamPath + "\\userdata\\config\\localconfig.vdf";
-    std::ifstream in(path);
-    if (!in.is_open()) return false;
-    std::string content((std::istreambuf_iterator<char>(in)),
-                         std::istreambuf_iterator<char>());
-    in.close();
+// ─────────────────────────────────────────────────────────
+// Custom dark style (Catppuccin-inspired)
+// ─────────────────────────────────────────────────────────
+void ApplyDarkStyle() {
+    ImGuiStyle& s = ImGui::GetStyle();
+    s.WindowRounding    = 8.0f;
+    s.FrameRounding     = 6.0f;
+    s.GrabRounding      = 4.0f;
+    s.ScrollbarRounding = 6.0f;
+    s.TabRounding       = 6.0f;
+    s.FramePadding      = {8, 5};
+    s.ItemSpacing       = {8, 6};
+    s.WindowPadding     = {16, 16};
+    s.ScrollbarSize     = 12.0f;
 
-    size_t pos = content.find(appID);
-    if (pos == std::string::npos) return false;
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]             = {0.118f, 0.118f, 0.180f, 1.0f};
+    c[ImGuiCol_ChildBg]              = {0.094f, 0.094f, 0.145f, 1.0f};
+    c[ImGuiCol_PopupBg]              = {0.118f, 0.118f, 0.180f, 1.0f};
+    c[ImGuiCol_Border]               = {0.271f, 0.278f, 0.322f, 1.0f};
+    c[ImGuiCol_FrameBg]              = {0.192f, 0.196f, 0.267f, 1.0f};
+    c[ImGuiCol_FrameBgHovered]       = {0.271f, 0.278f, 0.322f, 1.0f};
+    c[ImGuiCol_FrameBgActive]        = {0.271f, 0.278f, 0.322f, 1.0f};
+    c[ImGuiCol_TitleBg]              = {0.094f, 0.094f, 0.145f, 1.0f};
+    c[ImGuiCol_TitleBgActive]        = {0.094f, 0.094f, 0.145f, 1.0f};
+    c[ImGuiCol_ScrollbarBg]          = {0.094f, 0.094f, 0.145f, 1.0f};
+    c[ImGuiCol_ScrollbarGrab]        = {0.271f, 0.278f, 0.322f, 1.0f};
+    c[ImGuiCol_ScrollbarGrabHovered] = {0.361f, 0.369f, 0.431f, 1.0f};
+    c[ImGuiCol_CheckMark]            = {0.792f, 0.651f, 0.969f, 1.0f};
+    c[ImGuiCol_Button]               = {0.486f, 0.227f, 0.929f, 1.0f};
+    c[ImGuiCol_ButtonHovered]        = {0.427f, 0.169f, 0.851f, 1.0f};
+    c[ImGuiCol_ButtonActive]         = {0.357f, 0.129f, 0.714f, 1.0f};
+    c[ImGuiCol_Header]               = {0.192f, 0.196f, 0.267f, 1.0f};
+    c[ImGuiCol_HeaderHovered]        = {0.271f, 0.278f, 0.322f, 1.0f};
+    c[ImGuiCol_HeaderActive]         = {0.271f, 0.278f, 0.322f, 1.0f};
+    c[ImGuiCol_Tab]                  = {0.094f, 0.094f, 0.145f, 1.0f};
+    c[ImGuiCol_TabHovered]           = {0.192f, 0.196f, 0.267f, 1.0f};
+    c[ImGuiCol_TabActive]            = {0.192f, 0.196f, 0.267f, 1.0f};
+    c[ImGuiCol_TabUnfocusedActive]   = {0.192f, 0.196f, 0.267f, 1.0f};
+    c[ImGuiCol_Text]                 = {0.804f, 0.839f, 0.957f, 1.0f};
+    c[ImGuiCol_TextDisabled]         = {0.345f, 0.357f, 0.439f, 1.0f};
+    c[ImGuiCol_Separator]            = {0.192f, 0.196f, 0.267f, 1.0f};
+    c[ImGuiCol_TableHeaderBg]        = {0.094f, 0.094f, 0.145f, 1.0f};
+    c[ImGuiCol_TableBorderLight]     = {0.192f, 0.196f, 0.267f, 1.0f};
+    c[ImGuiCol_TableRowBg]           = {0.000f, 0.000f, 0.000f, 0.0f};
+    c[ImGuiCol_TableRowBgAlt]        = {1.000f, 1.000f, 1.000f, 0.03f};
+}
 
-    std::string newOpt = "\"LaunchOptions\" \"-mem " + std::to_string(memMB) + "\"";
-    size_t launchPos   = content.find("LaunchOptions", pos);
-    if (launchPos != std::string::npos) {
-        size_t end = content.find("\n", launchPos);
-        content.replace(launchPos, end - launchPos, newOpt);
-    } else {
-        content.insert(pos + appID.size(), "\n\t\t\t\t" + newOpt);
+// ─────────────────────────────────────────────────────────
+// Config panel helper
+// ─────────────────────────────────────────────────────────
+static ImVec4 purple = {0.792f, 0.651f, 0.969f, 1.0f};
+static ImVec4 green  = {0.651f, 0.890f, 0.631f, 1.0f};
+static ImVec4 red    = {0.953f, 0.545f, 0.659f, 1.0f};
+static ImVec4 muted  = {0.345f, 0.357f, 0.439f, 1.0f};
+static ImVec4 text2  = {0.651f, 0.678f, 0.784f, 1.0f};
+
+void DrawConfigPanel(const char* game, const char* appId,
+                     char* limitBuf, char* ramBuf,
+                     const std::string& steamPath,
+                     std::string& statusMsg,
+                     int& activeTab,
+                     std::vector<ProcessEntry>& processes,
+                     DWORD& lastRefresh, int& limitMB) {
+
+    ImGui::TextColored(muted, "%s CONFIGURATION", game);
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    ImGui::TextColored(text2, "RAM limit (all apps)");
+    ImGui::SameLine(230);
+    ImGui::SetNextItemWidth(120);
+    char limitId[32]; sprintf_s(limitId, "##limit_%s", game);
+    ImGui::InputText(limitId, limitBuf, 16, ImGuiInputTextFlags_CharsDecimal);
+    ImGui::SameLine();
+    ImGui::TextColored(purple, "MB");
+
+    ImGui::Spacing();
+    ImGui::TextColored(text2, "%s RAM target", game);
+    ImGui::SameLine(230);
+    ImGui::SetNextItemWidth(120);
+    char ramId[32]; sprintf_s(ramId, "##ram_%s", game);
+    ImGui::InputText(ramId, ramBuf, 16, ImGuiInputTextFlags_CharsDecimal);
+    ImGui::SameLine();
+    ImGui::TextColored(purple, "MB");
+
+    ImGui::Spacing();
+    ImGui::TextColored(text2, "Steam path");
+    ImGui::SameLine(230);
+    if (steamPath.empty())
+        ImGui::TextColored(red, "Steam not found");
+    else {
+        ImGui::TextColored(green, "%s", steamPath.c_str());
+        ImGui::SameLine();
+        ImGui::TextColored(green, "[Auto]");
     }
 
-    std::ofstream out(path);
-    if (!out.is_open()) return false;
-    out << content;
-    return true;
-}
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::TextColored(muted,
+        "Patches the -mem launch option in Steam config, then opens the monitor.");
+    ImGui::Spacing();
 
-void SetStatus(const wchar_t* msg) {
-    if (hStatusBar) SendMessageW(hStatusBar, SB_SETTEXTW, 0, (LPARAM)msg);
-}
+    if (steamPath.empty()) ImGui::BeginDisabled();
 
-int GetEditInt(HWND hEdit, int fallback) {
-    wchar_t buf[32];
-    GetWindowTextW(hEdit, buf, 32);
-    int v = _wtoi(buf);
-    return (v > 0) ? v : fallback;
-}
+    if (ImGui::Button("Apply & Start", {130, 32})) {
+        limitMB    = atoi(limitBuf);
+        int ramMB  = atoi(ramBuf);
+        if (limitMB <= 0) limitMB = 512;
+        if (ramMB   <= 0) ramMB   = 4096;
 
-// ═══════════════════════════════════════════════════════
-// LIST VIEW  (Monitor tab)
-// ═══════════════════════════════════════════════════════
-
-void InitListView(HWND hLV) {
-    ListView_SetExtendedListViewStyle(hLV,
-        LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
-
-    LVCOLUMNW col = {};
-    col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
-
-    col.fmt = LVCFMT_LEFT;
-    col.cx  = 220; col.pszText = (LPWSTR)L"Process";
-    ListView_InsertColumn(hLV, 0, &col);
-
-    col.cx  = 80;  col.pszText = (LPWSTR)L"PID";
-    ListView_InsertColumn(hLV, 1, &col);
-
-    col.fmt = LVCFMT_RIGHT;
-    col.cx  = 110; col.pszText = (LPWSTR)L"RAM (MB)";
-    ListView_InsertColumn(hLV, 2, &col);
-
-    col.cx  = 100; col.pszText = (LPWSTR)L"Status";
-    ListView_InsertColumn(hLV, 3, &col);
-}
-
-void RefreshListView() {
-    auto procs = GetProcesses();
-    ListView_DeleteAllItems(hListView);
-
-    int idx = 0;
-    for (auto& p : procs) {
-        double mb = p.memory / (1024.0 * 1024.0);
-        bool warn = (p.name != L"dota2.exe" && p.name != L"cs2.exe" && mb > gLimitMB);
-
-        LVITEMW item = {};
-        item.mask    = LVIF_TEXT;
-        item.iItem   = idx;
-
-        item.pszText = (LPWSTR)p.name.c_str();
-        ListView_InsertItem(hListView, &item);
-
-        std::wstring pidStr = std::to_wstring(p.pid);
-        ListView_SetItemText(hListView, idx, 1, (LPWSTR)pidStr.c_str());
-
-        std::wostringstream oss;
-        oss << std::fixed << std::setprecision(1) << mb;
-        std::wstring mbStr = oss.str();
-        ListView_SetItemText(hListView, idx, 2, (LPWSTR)mbStr.c_str());
-
-        std::wstring status = warn ? L"⚠ High RAM" : L"OK";
-        ListView_SetItemText(hListView, idx, 3, (LPWSTR)status.c_str());
-
-        idx++;
-        if (idx >= 40) break;
+        bool ok = PatchLaunchOptions(steamPath, appId, ramMB);
+        statusMsg   = ok
+            ? std::string(game) + " launch options applied."
+            : "Could not write Steam config — check permissions.";
+        processes   = GetProcesses(limitMB);
+        lastRefresh = GetTickCount();
+        activeTab   = 2;
     }
 
-    SetStatus(L"Monitoring active  ·  Auto-refresh every 2 s");
-}
+    if (steamPath.empty()) ImGui::EndDisabled();
 
-// ═══════════════════════════════════════════════════════
-// TAB SWITCHING
-// ═══════════════════════════════════════════════════════
-
-void ShowTab(int i) {
-    ShowWindow(hPanelDota,     i == 0 ? SW_SHOW : SW_HIDE);
-    ShowWindow(hPanelCS,       i == 1 ? SW_SHOW : SW_HIDE);
-    ShowWindow(hPanelMonitor,  i == 2 ? SW_SHOW : SW_HIDE);
-    ShowWindow(hPanelSettings, i == 3 ? SW_SHOW : SW_HIDE);
-}
-
-// ═══════════════════════════════════════════════════════
-// PANEL BUILDER HELPERS
-// ═══════════════════════════════════════════════════════
-
-HWND MakeStatic(HWND parent, const wchar_t* text, int x, int y, int w, int h, DWORD extra = 0) {
-    return CreateWindowExW(0, L"STATIC", text,
-        WS_CHILD | WS_VISIBLE | SS_LEFT | extra,
-        x, y, w, h, parent, nullptr, GetModuleHandleW(nullptr), nullptr);
-}
-
-HWND MakeEdit(HWND parent, const wchar_t* text, int x, int y, int w, int id) {
-    HWND h = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", text,
-        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-        x, y, w, 24, parent, (HMENU)(intptr_t)id,
-        GetModuleHandleW(nullptr), nullptr);
-    return h;
-}
-
-HWND MakeButton(HWND parent, const wchar_t* text, int x, int y, int w, int id) {
-    return CreateWindowExW(0, L"BUTTON", text,
-        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        x, y, w, 28, parent, (HMENU)(intptr_t)id,
-        GetModuleHandleW(nullptr), nullptr);
-}
-
-void SetFont(HWND h, HFONT f) { SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE); }
-
-// ═══════════════════════════════════════════════════════
-// BUILD PANELS
-// ═══════════════════════════════════════════════════════
-
-HWND MakePanel(HWND parent) {
-    return CreateWindowExW(0, L"STATIC", L"",
-        WS_CHILD | SS_LEFT,
-        0, 0, 0, 0, parent, nullptr,
-        GetModuleHandleW(nullptr), nullptr);
-}
-
-void BuildPanels(HWND parent, HFONT hFont, HFONT hBold, RECT clientArea) {
-    int px = clientArea.left + 14;
-    int py = clientArea.top  + 14;
-    int pw = clientArea.right  - clientArea.left - 28;
-    int ph = clientArea.bottom - clientArea.top  - 14;
-
-    // ── DOTA 2 PANEL ──────────────────────────────────
-    hPanelDota = MakePanel(parent);
-    SetWindowPos(hPanelDota, nullptr, px, py, pw, ph, SWP_NOZORDER);
-
-    {
-        HWND h;
-        h = MakeStatic(hPanelDota, L"Game configuration — Dota 2", 0, 0, 400, 20, SS_SUNKEN);
-        SetFont(h, hBold);
-
-        MakeStatic(hPanelDota, L"RAM limit for all other apps (MB):", 0, 36, 260, 20);
-        hEditLimit = MakeEdit(hPanelDota, L"512", 270, 34, 100, ID_EDIT_LIMIT);
-        SetFont(hEditLimit, hFont);
-
-        MakeStatic(hPanelDota, L"Dota 2 RAM target (MB):", 0, 72, 260, 20);
-        hEditDota = MakeEdit(hPanelDota, L"4096", 270, 70, 100, ID_EDIT_DOTA);
-        SetFont(hEditDota, hFont);
-
-        MakeStatic(hPanelDota, L"Steam path (auto-detected):", 0, 108, 260, 20);
-        std::wstring sp(gSteamPath.begin(), gSteamPath.end());
-        hEditSteam = MakeEdit(hPanelDota, sp.c_str(), 270, 106, pw - 270, ID_EDIT_STEAM);
-        SetFont(hEditSteam, hFont);
-        EnableWindow(hEditSteam, FALSE);
-
-        hBtnApply = MakeButton(hPanelDota, L"Apply & Start", 0, 150, 130, ID_BTN_APPLY);
-        SetFont(hBtnApply, hFont);
-        hBtnReset = MakeButton(hPanelDota, L"Reset Defaults", 140, 150, 130, ID_BTN_RESET);
-        SetFont(hBtnReset, hFont);
-
-        h = MakeStatic(hPanelDota,
-            L"Applies the -mem launch option to Dota 2 in your Steam config,\r\n"
-            L"then opens the process monitor.",
-            0, 194, pw, 40);
-        SetFont(h, hFont);
-    }
-
-    // ── CS2 PANEL ─────────────────────────────────────
-    hPanelCS = MakePanel(parent);
-    SetWindowPos(hPanelCS, nullptr, px, py, pw, ph, SWP_NOZORDER);
-
-    {
-        HWND h;
-        h = MakeStatic(hPanelCS, L"Game configuration — CS2", 0, 0, 400, 20, SS_SUNKEN);
-        SetFont(h, hBold);
-
-        MakeStatic(hPanelCS, L"RAM limit for all other apps (MB):", 0, 36, 260, 20);
-        HWND hEL2 = MakeEdit(hPanelCS, L"512", 270, 34, 100, ID_EDIT_LIMIT);
-        SetFont(hEL2, hFont);
-
-        MakeStatic(hPanelCS, L"CS2 RAM target (MB):", 0, 72, 260, 20);
-        hEditCS = MakeEdit(hPanelCS, L"4096", 270, 70, 100, ID_EDIT_CS);
-        SetFont(hEditCS, hFont);
-
-        MakeStatic(hPanelCS, L"Steam path (auto-detected):", 0, 108, 260, 20);
-        std::wstring sp(gSteamPath.begin(), gSteamPath.end());
-        HWND hES2 = MakeEdit(hPanelCS, sp.c_str(), 270, 106, pw - 270, ID_EDIT_STEAM);
-        SetFont(hES2, hFont);
-        EnableWindow(hES2, FALSE);
-
-        HWND hBA2 = MakeButton(hPanelCS, L"Apply & Start", 0, 150, 130, ID_BTN_APPLY);
-        SetFont(hBA2, hFont);
-        HWND hBR2 = MakeButton(hPanelCS, L"Reset Defaults", 140, 150, 130, ID_BTN_RESET);
-        SetFont(hBR2, hFont);
-
-        h = MakeStatic(hPanelCS,
-            L"Applies the -mem launch option to CS2 in your Steam config,\r\n"
-            L"then opens the process monitor.",
-            0, 194, pw, 40);
-        SetFont(h, hFont);
-    }
-
-    // ── MONITOR PANEL ─────────────────────────────────
-    hPanelMonitor = MakePanel(parent);
-    SetWindowPos(hPanelMonitor, nullptr, px, py, pw, ph, SWP_NOZORDER);
-
-    hListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-        0, 0, pw, ph - 10,
-        hPanelMonitor, (HMENU)ID_LISTVIEW,
-        GetModuleHandleW(nullptr), nullptr);
-    InitListView(hListView);
-
-    // ── SETTINGS PANEL ────────────────────────────────
-    hPanelSettings = MakePanel(parent);
-    SetWindowPos(hPanelSettings, nullptr, px, py, pw, ph, SWP_NOZORDER);
-
-    {
-        HWND h;
-        h = MakeStatic(hPanelSettings, L"Settings", 0, 0, 300, 20, SS_SUNKEN);
-        SetFont(h, hBold);
-
-        h = MakeStatic(hPanelSettings,
-            L"EasyRam  v1.0.0\r\n\r\n"
-            L"Steam path is detected automatically from the Windows registry.\r\n"
-            L"Launch options are written to:\r\n"
-            L"  Steam\\userdata\\config\\localconfig.vdf\r\n\r\n"
-            L"Process monitor refreshes every 2 seconds.\r\n"
-            L"Warnings appear for processes exceeding your RAM limit\r\n"
-            L"(Dota 2 and CS2 are always excluded from warnings).",
-            0, 36, pw, 200);
-        SetFont(h, hFont);
+    ImGui::SameLine();
+    if (ImGui::Button("Reset", {80, 32})) {
+        strcpy_s(limitBuf, 16, "512");
+        strcpy_s(ramBuf,   16, "4096");
     }
 }
 
-// ═══════════════════════════════════════════════════════
-// APPLY HANDLER
-// ═══════════════════════════════════════════════════════
-
-void OnApply(int tabIndex) {
-    gLimitMB = GetEditInt(hEditLimit, 512);
-
-    if (tabIndex == 0) {
-        gDotaMB = GetEditInt(hEditDota, 4096);
-        if (gSteamPath.empty()) {
-            MessageBoxW(hMain, L"Steam not found.", L"EasyRam", MB_ICONWARNING);
-            return;
-        }
-        bool ok = PatchLaunchOptions(gSteamPath, "570", gDotaMB);
-        SetStatus(ok ? L"Dota 2 launch options applied." : L"Could not write Steam config.");
-    } else {
-        gCSMB = GetEditInt(hEditCS, 4096);
-        if (gSteamPath.empty()) {
-            MessageBoxW(hMain, L"Steam not found.", L"EasyRam", MB_ICONWARNING);
-            return;
-        }
-        bool ok = PatchLaunchOptions(gSteamPath, "730", gCSMB);
-        SetStatus(ok ? L"CS2 launch options applied." : L"Could not write Steam config.");
-    }
-
-    // switch to Monitor tab
-    TabCtrl_SetCurSel(hTab, 2);
-    ShowTab(2);
-    RefreshListView();
-}
-
-// ═══════════════════════════════════════════════════════
-// WINDOW PROCEDURE
-// ═══════════════════════════════════════════════════════
-
-LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    static int currentTab = 0;
-
-    switch (msg) {
-    case WM_CREATE: {
-        // fonts
-        HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        LOGFONTW lf = {};
-        GetObjectW(hFont, sizeof(lf), &lf);
-        lf.lfWeight = FW_BOLD;
-        HFONT hBold = CreateFontIndirectW(&lf);
-
-        // status bar
-        hStatusBar = CreateWindowExW(0, STATUSCLASSNAMEW, L"Ready",
-            WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
-            0, 0, 0, 0, hWnd, (HMENU)ID_STATUSBAR,
-            GetModuleHandleW(nullptr), nullptr);
-
-        // tab control
-        hTab = CreateWindowExW(0, WC_TABCONTROLW, L"",
-            WS_CHILD | WS_VISIBLE | TCS_FIXEDWIDTH,
-            0, 0, 0, 0, hWnd, (HMENU)ID_TAB,
-            GetModuleHandleW(nullptr), nullptr);
-        SetFont(hTab, hFont);
-
-        TCITEMW ti = {};
-        ti.mask = TCIF_TEXT;
-        ti.pszText = (LPWSTR)L"Dota 2";   TabCtrl_InsertItem(hTab, 0, &ti);
-        ti.pszText = (LPWSTR)L"CS2";       TabCtrl_InsertItem(hTab, 1, &ti);
-        ti.pszText = (LPWSTR)L"Monitor";   TabCtrl_InsertItem(hTab, 2, &ti);
-        ti.pszText = (LPWSTR)L"Settings";  TabCtrl_InsertItem(hTab, 3, &ti);
-
-        // client area for panels (below tab header)
-        RECT rc; GetClientRect(hWnd, &rc);
-        RECT tabArea = {0, 0, rc.right, rc.bottom - 22};
-        TabCtrl_AdjustRect(hTab, FALSE, &tabArea);
-
-        gSteamPath = GetSteamPath();
-        BuildPanels(hWnd, hFont, hBold, tabArea);
-        ShowTab(0);
-
-        SetTimer(hWnd, ID_TIMER, 2000, nullptr);
-
-        if (gSteamPath.empty())
-            SetStatus(L"Steam not found — check your installation.");
-        else
-            SetStatus(L"Steam detected. Configure a game and click Apply & Start.");
-
-        return 0;
-    }
-
-    case WM_SIZE: {
-        int W = LOWORD(lParam), H = HIWORD(lParam);
-        SendMessageW(hStatusBar, WM_SIZE, 0, 0);
-
-        RECT sbrc; GetWindowRect(hStatusBar, &sbrc);
-        int sbH = sbrc.bottom - sbrc.top;
-
-        SetWindowPos(hTab, nullptr, 0, 0, W, H - sbH, SWP_NOZORDER);
-
-        RECT tabArea = {0, 0, W, H - sbH};
-        TabCtrl_AdjustRect(hTab, FALSE, &tabArea);
-        int px = tabArea.left  + 14;
-        int py = tabArea.top   + 14;
-        int pw = tabArea.right  - tabArea.left - 28;
-        int ph = tabArea.bottom - tabArea.top  - 14;
-
-        for (HWND panel : {hPanelDota, hPanelCS, hPanelMonitor, hPanelSettings})
-            SetWindowPos(panel, nullptr, px, py, pw, ph, SWP_NOZORDER);
-
-        if (hListView)
-            SetWindowPos(hListView, nullptr, 0, 0, pw, ph - 10, SWP_NOZORDER);
-
-        return 0;
-    }
-
-    case WM_TIMER:
-        if (wParam == ID_TIMER && IsWindowVisible(hPanelMonitor))
-            RefreshListView();
-        return 0;
-
-    case WM_NOTIFY: {
-        NMHDR* nm = (NMHDR*)lParam;
-        if (nm->idFrom == ID_TAB && nm->code == TCN_SELCHANGE) {
-            currentTab = TabCtrl_GetCurSel(hTab);
-            ShowTab(currentTab);
-            if (currentTab == 2) RefreshListView();
-        }
-        return 0;
-    }
-
-    case WM_COMMAND: {
-        int id  = LOWORD(wParam);
-        int evt = HIWORD(wParam);
-        if (id == ID_BTN_APPLY && evt == BN_CLICKED)
-            OnApply(currentTab);
-        if (id == ID_BTN_RESET && evt == BN_CLICKED) {
-            SetWindowTextW(hEditLimit, L"512");
-            SetWindowTextW(hEditDota,  L"4096");
-            if (hEditCS) SetWindowTextW(hEditCS, L"4096");
-        }
-        return 0;
-    }
-
-    case WM_DESTROY:
-        KillTimer(hWnd, ID_TIMER);
-        PostQuitMessage(0);
-        return 0;
-    }
-
-    return DefWindowProcW(hWnd, msg, wParam, lParam);
-}
-
-// ═══════════════════════════════════════════════════════
-// ENTRY POINT
-// ═══════════════════════════════════════════════════════
-
-int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
-    InitCommonControls();
-
+// ─────────────────────────────────────────────────────────
+// WinMain
+// ─────────────────────────────────────────────────────────
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     WNDCLASSEXW wc  = {};
     wc.cbSize       = sizeof(wc);
+    wc.style        = CS_CLASSDC;
     wc.lpfnWndProc  = WndProc;
     wc.hInstance    = hInst;
     wc.hCursor      = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground= (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.lpszClassName= L"EasyRamWnd";
-    wc.hIcon        = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.lpszClassName= L"EasyRamImGui";
     RegisterClassExW(&wc);
 
-    hMain = CreateWindowExW(0, L"EasyRamWnd", L"EasyRam  —  RAM Monitor & Game Optimizer",
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 660, 460,
+    g_hwnd = CreateWindowExW(0, L"EasyRamImGui",
+        L"EasyRam \u2014 RAM Monitor & Game Optimizer",
+        WS_OVERLAPPEDWINDOW, 100, 100, 720, 560,
         nullptr, nullptr, hInst, nullptr);
 
-    ShowWindow(hMain, nCmdShow);
-    UpdateWindow(hMain);
+    if (!CreateDeviceD3D(g_hwnd)) {
+        CleanupDeviceD3D();
+        UnregisterClassW(wc.lpszClassName, hInst);
+        return 1;
+    }
+
+    ShowWindow(g_hwnd, SW_SHOWDEFAULT);
+    UpdateWindow(g_hwnd);
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+    ApplyDarkStyle();
+    ImGui_ImplWin32_Init(g_hwnd);
+    ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+
+    std::string steamPath = GetSteamPath();
+    std::string statusMsg = steamPath.empty()
+        ? "Steam not found."
+        : "Steam detected. Configure a game and click Apply & Start.";
+
+    char dotaLimitBuf[16] = "512";
+    char dotaRamBuf[16]   = "4096";
+    char csLimitBuf[16]   = "512";
+    char csRamBuf[16]     = "4096";
+
+    int  activeTab  = 0;
+    int  limitMB    = 512;
+    bool running    = true;
+
+    std::vector<ProcessEntry> processes;
+    DWORD lastRefresh = 0;
+
+    ImVec4 clearColor = {0.118f, 0.118f, 0.180f, 1.0f};
 
     MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+    while (running) {
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+            if (msg.message == WM_QUIT) running = false;
+        }
+        if (!running) break;
+
+        if (activeTab == 2 && GetTickCount() - lastRefresh > 2000) {
+            processes   = GetProcesses(limitMB);
+            lastRefresh = GetTickCount();
+        }
+
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+
+        RECT rc; GetClientRect(g_hwnd, &rc);
+        ImGui::SetNextWindowPos({0, 0});
+        ImGui::SetNextWindowSize({(float)rc.right, (float)rc.bottom});
+        ImGui::Begin("##main", nullptr,
+            ImGuiWindowFlags_NoTitleBar    | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove        | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+        // Header
+        ImGui::TextColored(purple, "  EasyRam");
+        ImGui::SameLine();
+        ImGui::TextColored(muted, "v1.0.0  \xe2\x80\x94  RAM Monitor & Game Optimizer");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (ImGui::BeginTabBar("MainTabs")) {
+
+            // DOTA 2
+            if (ImGui::BeginTabItem("  Dota 2  ")) {
+                activeTab = 0;
+                ImGui::Spacing();
+                DrawConfigPanel("DOTA 2", "570",
+                    dotaLimitBuf, dotaRamBuf,
+                    steamPath, statusMsg, activeTab,
+                    processes, lastRefresh, limitMB);
+                ImGui::EndTabItem();
+            }
+
+            // CS2
+            if (ImGui::BeginTabItem("  CS2  ")) {
+                activeTab = 1;
+                ImGui::Spacing();
+                DrawConfigPanel("CS2", "730",
+                    csLimitBuf, csRamBuf,
+                    steamPath, statusMsg, activeTab,
+                    processes, lastRefresh, limitMB);
+                ImGui::EndTabItem();
+            }
+
+            // MONITOR
+            if (ImGui::BeginTabItem("  Monitor  ")) {
+                activeTab = 2;
+                ImGui::Spacing();
+                ImGui::TextColored(muted, "LIVE PROCESS MONITOR");
+                ImGui::SameLine(ImGui::GetContentRegionAvail().x - 90);
+                if (ImGui::SmallButton("Refresh now")) {
+                    processes   = GetProcesses(limitMB);
+                    lastRefresh = GetTickCount();
+                }
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                if (ImGui::BeginTable("procs", 4,
+                    ImGuiTableFlags_Borders |
+                    ImGuiTableFlags_RowBg   |
+                    ImGuiTableFlags_ScrollY |
+                    ImGuiTableFlags_SizingStretchProp,
+                    {0, ImGui::GetContentRegionAvail().y - 30}))
+                {
+                    ImGui::TableSetupScrollFreeze(0, 1);
+                    ImGui::TableSetupColumn("Process",  ImGuiTableColumnFlags_WidthStretch, 3.0f);
+                    ImGui::TableSetupColumn("PID",      ImGuiTableColumnFlags_WidthStretch, 1.0f);
+                    ImGui::TableSetupColumn("RAM (MB)", ImGuiTableColumnFlags_WidthStretch, 1.5f);
+                    ImGui::TableSetupColumn("Status",   ImGuiTableColumnFlags_WidthStretch, 1.5f);
+                    ImGui::TableHeadersRow();
+
+                    for (auto& p : processes) {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::TextUnformatted(p.name.c_str());
+
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("%lu", p.pid);
+
+                        ImGui::TableSetColumnIndex(2);
+                        std::ostringstream ss;
+                        ss << std::fixed << std::setprecision(1) << p.ramMB;
+                        if (p.highRam)
+                            ImGui::TextColored(red, "%s", ss.str().c_str());
+                        else if (p.name == "dota2.exe" || p.name == "cs2.exe")
+                            ImGui::TextColored(purple, "%s", ss.str().c_str());
+                        else
+                            ImGui::TextUnformatted(ss.str().c_str());
+
+                        ImGui::TableSetColumnIndex(3);
+                        if (p.highRam)
+                            ImGui::TextColored(red, "High RAM");
+                        else if (p.name == "dota2.exe" || p.name == "cs2.exe")
+                            ImGui::TextColored(purple, "Active");
+                        else
+                            ImGui::TextColored(green, "OK");
+                    }
+                    ImGui::EndTable();
+                }
+                ImGui::EndTabItem();
+            }
+
+            // SETTINGS
+            if (ImGui::BeginTabItem("  Settings  ")) {
+                activeTab = 3;
+                ImGui::Spacing();
+                ImGui::TextColored(muted, "ABOUT EASYRAM");
+                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::TextColored(purple, "EasyRam v1.0.0");
+                ImGui::Spacing();
+                ImGui::TextWrapped(
+                    "Steam path is detected automatically from the Windows registry.\n\n"
+                    "Launch options are written to:\n"
+                    "  Steam\\userdata\\config\\localconfig.vdf\n\n"
+                    "The process monitor refreshes every 2 seconds automatically.\n"
+                    "Warnings appear for processes exceeding your RAM limit.\n"
+                    "Dota 2 and CS2 processes are always excluded from warnings.");
+                ImGui::EndTabItem();
+            }
+
+            ImGui::EndTabBar();
+        }
+
+        // Status bar
+        ImGui::SetCursorPosY(ImGui::GetWindowHeight() - 28);
+        ImGui::Separator();
+        ImGui::TextColored(steamPath.empty() ? red : green,
+            "  %s", steamPath.empty() ? "[No Steam]" : "[Steam OK]");
+        ImGui::SameLine();
+        ImGui::TextColored(muted, "%s", statusMsg.c_str());
+
+        ImGui::End();
+
+        ImGui::Render();
+        const float cc[4] = {clearColor.x, clearColor.y, clearColor.z, clearColor.w};
+        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, cc);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        g_pSwapChain->Present(1, 0);
     }
-    return (int)msg.wParam;
+
+    ImGui_ImplDX11_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
+    CleanupDeviceD3D();
+    DestroyWindow(g_hwnd);
+    UnregisterClassW(wc.lpszClassName, hInst);
+    return 0;
 }
